@@ -19,12 +19,14 @@ options:
   --timeout-ms N            menu timeout (default: 8000)
   --bootargs STR            Linux cmdline (default: config/sheng.env)
   --partition-size N        boot partition size (default: 201326592)
+  --diagnostic              add Linux diagnostics under Advanced
+  --early-console           add sheng simplefb runtime handoff template
   --keep-work               keep out/work
 USAGE
 }
 
 payload=""; runtime=""; out=""; default="$SHENG_DEFAULT_OS"; timeout="$SHENG_TIMEOUT_MS"
-bootargs="$SHENG_BOOTARGS"; part="$SHENG_BOOT_PARTITION_SIZE"; keep=()
+bootargs="$SHENG_BOOTARGS"; part="$SHENG_BOOT_PARTITION_SIZE"; keep=(); diagnostic=(); early_console=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --payload) payload=$2; shift 2 ;;
@@ -34,6 +36,8 @@ while [ $# -gt 0 ]; do
     --timeout-ms) timeout=$2; shift 2 ;;
     --bootargs) bootargs=$2; shift 2 ;;
     --partition-size) part=$2; shift 2 ;;
+    --diagnostic) diagnostic=(--diagnostic); shift ;;
+    --early-console) early_console=(--early-console); shift ;;
     --keep-work) keep=(--keep-work); shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -58,4 +62,4 @@ python3 "$ROOT/packer/make_boot.py" \
   --timeout-ms "$timeout" \
   --bootargs "$bootargs" \
   --partition-size "$part" \
-  "${keep[@]}"
+  "${keep[@]}" "${diagnostic[@]}" "${early_console[@]}"

@@ -1,0 +1,3 @@
+# Unified diffs contain intentional space-before-tab context and "-- " trailers.
+# Preserve imported patches verbatim; keep normal whitespace checks for source.
+*.patch -whitespace

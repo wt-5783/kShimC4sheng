@@ -5,12 +5,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers
 sys.path.insert(0, helpers.sys_path)
 import bootimg  # noqa: E402
 import manifest  # noqa: E402
+import fdt  # noqa: E402
 
 MAKE_BOOT = os.path.join(helpers.ROOT, "packer", "make_boot.py")
 PACKER = os.path.join(helpers.ROOT, "build", "packer", "MultiBootKernelPatcher")
@@ -103,6 +105,104 @@ class PackTest(unittest.TestCase):
         idx = subprocess.run(["fdtget", "-t", "u", dtb_path, "/chosen", "kshim,initrd-entry"],
                              capture_output=True, text=True, check=True).stdout.strip()
         self.assertEqual(idx, "3")
+
+    def test_diagnostic_entry(self):
+        for with_initrd in (False, True):
+            with self.subTest(initrd=with_initrd):
+                extra = []
+                if with_initrd:
+                    initrd = os.path.join(self.d, "initrd.img")
+                    with open(initrd, "wb") as out:
+                        # Real initrds rarely end exactly on a page boundary.
+                        out.write(b"x" * 4097)
+                    extra = ["--initrd", initrd]
+                normal_args = "root=PARTLABEL=linux rw quiet loglevel=3 systemd.unit=graphical.target"
+                p = self.build("--diagnostic", "--bootargs", normal_args, *extra)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                image, m = self.load()
+                normal = m["entries"][1]
+                diag_idx = 4 if with_initrd else 3
+                diag = m["entries"][diag_idx]
+                self.assertEqual(diag["name"], "Linux diagnostics")
+                self.assertIn("EXECUTABLE", diag["flag_names"])
+                self.assertEqual((diag["offset"], diag["size"]),
+                                 (normal["offset"], normal["size"]))
+                self.assertEqual(diag["dtb_entry"], diag_idx + 1)
+                if with_initrd:
+                    blob = m["entries"][3]
+                    dtb_entry = m["entries"][diag["dtb_entry"]]
+                    for page in (4096, 16384, 65536):
+                        rounded_end = (blob["offset"] + blob["size"] + page - 1) & ~(page - 1)
+                        self.assertGreaterEqual(dtb_entry["offset"], rounded_end,
+                                                "diagnostic DTB overlaps initrd copy pages")
+                self.assertEqual(m["default_entry"], 0)
+                def tree(index):
+                    e = m["entries"][index]
+                    return fdt.Fdt.parse(image["kernel"][e["offset"]:e["offset"] + e["size"]])
+                normal_tree = tree(normal["dtb_entry"])
+                self.assertEqual(normal_tree.get("/chosen", "bootargs"),
+                                 normal_args.encode() + b"\0")
+                self.assertIsNone(normal_tree.get("/chosen", "armada,boot-stage"))
+                dt = tree(diag["dtb_entry"])
+                self.assertEqual(dt.get("/chosen", "armada,boot-stage"), b"maintenance\0")
+                args = dt.get("/chosen", "bootargs").rstrip(b"\0").decode().split()
+                self.assertIn("systemd.unit=multi-user.target", args)
+                self.assertIn("loglevel=7", args)
+                self.assertNotIn("quiet", args)
+                self.assertNotIn("systemd.unit=graphical.target", args)
+                self.assertNotIn("loglevel=3", args)
+                self.assertEqual(dt.get("/chosen", "kshim,initrd-entry"),
+                                 (3).to_bytes(4, "big") if with_initrd else None)
+
+    def test_early_console_and_diagnostic_real_handoff(self):
+        # Preserve unit identity while adding only the disabled display template.
+        source = fdt.Fdt.parse(Path(self.dtb).read_bytes())
+        source.set("/bluetooth", "local-bd-address", b"\x01\x02\x03\x04\x05\x06")
+        source.write(self.dtb)
+        original = Path(self.dtb).read_bytes()
+        initrd = os.path.join(self.d, "initrd.img")
+        with open(initrd, "wb") as out:
+            out.write(b"x" * 4097)
+        args = "root=PARTLABEL=linux rw console=tty0 loglevel=7"
+        p = self.build("--early-console", "--diagnostic", "--initrd", initrd,
+                       "--bootargs", args)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(Path(self.dtb).read_bytes(), original)
+        image, m = self.load()
+        for index in (1, 4):
+            entry = m["entries"][m["entries"][index]["dtb_entry"]]
+            tree = fdt.Fdt.parse(image["kernel"][entry["offset"]:entry["offset"] + entry["size"]])
+            self.assertEqual(tree.get("/chosen/framebuffer", "status"), b"disabled\0")
+            self.assertIsNone(tree.get("/chosen/framebuffer", "reg"))
+            self.assertEqual(tree.get("/bluetooth", "local-bd-address"),
+                             b"\x01\x02\x03\x04\x05\x06")
+            # Replay both real C validators, not just the Python packer.
+            check = subprocess.run(
+                ["bash", "tests/check-packed-initrd.sh", self.out, str(index), "0", "--early-console"],
+                cwd=helpers.ROOT, capture_output=True, text=True)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+            self.assertIn("real simplefb handoff enables sheng scanout", check.stdout)
+        report = json.loads(Path(self.out + ".json").read_text())
+        self.assertTrue(report["early_console"])
+        normal = m["entries"][2]
+        tree = fdt.Fdt.parse(image["kernel"][normal["offset"]:normal["offset"] + normal["size"]])
+        self.assertEqual(tree.get("/chosen", "bootargs"), args.encode() + b"\0")
+
+    def test_early_console_is_opt_in(self):
+        p = self.build()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        image, m = self.load()
+        entry = m["entries"][2]
+        tree = fdt.Fdt.parse(image["kernel"][entry["offset"]:entry["offset"] + entry["size"]])
+        self.assertIsNone(tree.node("/chosen/framebuffer"))
+        self.assertFalse(json.loads(Path(self.out + ".json").read_text())["early_console"])
+
+    def test_early_console_rejects_other_board(self):
+        helpers.make_dtb(self.dtb, compatible="lenovo,other")
+        p = self.build("--early-console")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("requires a xiaomi,sheng DTB", p.stderr)
+        self.assertFalse(os.path.exists(self.out))
 
     def test_rejects_oversized_payload(self):
         p = self.build("--partition-size", "1048576")

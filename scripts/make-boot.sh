@@ -16,6 +16,8 @@ options:
   --default android|linux   menu default (default: android)
   --timeout-ms N      menu timeout (default: 8000)
   --bootargs STR      Linux cmdline (default: root=PARTLABEL=linux rw rootwait)
+  --diagnostic        add Linux diagnostics under Advanced
+  --early-console     add sheng simplefb runtime handoff template
   --keep-payload      keep the extracted payload directory
   -h, --help
 
@@ -31,7 +33,7 @@ if [ -z "$runtime" ]; then
   else runtime="$ROOT/prebuilt/sheng-runtime.bin"; fi
 fi
 default="$SHENG_DEFAULT_OS"; timeout="$SHENG_TIMEOUT_MS"; bootargs="$SHENG_BOOTARGS"
-keep=0
+keep=0; diagnostic=(); early_console=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --stock-boot) stock=$2; shift 2 ;;
@@ -44,6 +46,8 @@ while [ $# -gt 0 ]; do
     --default) default=$2; shift 2 ;;
     --timeout-ms) timeout=$2; shift 2 ;;
     --bootargs) bootargs=$2; shift 2 ;;
+    --diagnostic) diagnostic=(--diagnostic); shift ;;
+    --early-console) early_console=(--early-console); shift ;;
     --keep-payload) keep=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -94,7 +98,7 @@ fi
 
 "$ROOT/scripts/build.sh" \
   --payload "$work" --runtime "$runtime" --out "$out" \
-  --default "$default" --timeout-ms "$timeout" --bootargs "$bootargs"
+  --default "$default" --timeout-ms "$timeout" --bootargs "$bootargs" "${diagnostic[@]}" "${early_console[@]}"
 
 echo
 echo "boot image: $out"

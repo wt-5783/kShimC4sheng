@@ -57,15 +57,58 @@ def read(path, label):
     return data
 
 
-def patch_dtb(src, dst, bootargs, initrd_index):
+def add_early_console_template(tree):
+    """Opt-in sheng template; the runtime supplies the live scanout geometry.
+
+    Match dt_simplefb_apply()'s contract before making any changes. Never copy
+    another board's physical address, enable a static framebuffer, or silently
+    reinterpret an existing /chosen bus layout.
+    """
+    if b"xiaomi,sheng" not in (tree.get("/", "compatible") or b"").split(b"\0"):
+        raise fdt.FdtError("--early-console requires a xiaomi,sheng DTB")
+    chosen = tree.node("/chosen")
+    children = chosen.children if chosen else []
+    for prop in ("#address-cells", "#size-cells"):
+        value = tree.get("/chosen", prop)
+        if value is not None and value != (2).to_bytes(4, "big"):
+            raise fdt.FdtError("early console requires /chosen %s = <2>" % prop)
+        if value is None and any(n.get("reg") is not None for n in children):
+            raise fdt.FdtError("cannot change /chosen bus cells with existing reg children")
+    if tree.get("/chosen", "ranges") not in (None, b""):
+        raise fdt.FdtError("early console requires empty /chosen ranges")
+    templates = [n for n in children
+                 if b"simple-framebuffer" in (n.get("compatible") or b"").split(b"\0")]
+    if len(templates) > 1:
+        raise fdt.FdtError("duplicate simple-framebuffer templates")
+    if templates:
+        template = templates[0]
+        if template.get("status") != b"disabled\0" or template.get("memory-region") is not None:
+            raise fdt.FdtError("simple-framebuffer must be disabled and have no memory-region")
+    elif chosen and chosen.child("framebuffer") is not None:
+        raise fdt.FdtError("/chosen/framebuffer name collision")
+
+    # All rejection paths above leave the input tree unchanged.
+    for prop in ("#address-cells", "#size-cells"):
+        tree.set("/chosen", prop, (2).to_bytes(4, "big"))
+    tree.set("/chosen", "ranges", b"")
+    if not templates:
+        tree.set("/chosen/framebuffer", "compatible", b"simple-framebuffer\0")
+        tree.set("/chosen/framebuffer", "status", b"disabled\0")
+
+
+def patch_dtb(src, dst, bootargs, initrd_index, diagnostic=False, early_console=False):
     """Edit /chosen with the pure-Python FDT code (works on Windows too)."""
     with open(src, "rb") as f:
         blob = f.read()
     try:
         tree = fdt.Fdt.parse(blob)
+        if early_console:
+            add_early_console_template(tree)
     except fdt.FdtError as e:
         die("%s: %s" % (src, e))
     tree.set("/chosen", "bootargs", bootargs.encode("utf-8") + b"\0")
+    if diagnostic:
+        tree.set("/chosen", "armada,boot-stage", b"maintenance\0")
     if initrd_index is not None:
         tree.set("/chosen", "kshim,initrd-entry", int(initrd_index).to_bytes(4, "big"))
     else:
@@ -121,7 +164,28 @@ def write_config(path, args, staged):
             "Path = %s" % staged["initrd"],
             "Type = Blob",
             "BaseImage = false",
-            "Align = 12",
+            # The real handoff checks whole 4/16/64 KiB pages. Avoid sharing
+            # the first initrd page with the preceding kernel or source DTB.
+            "Align = 16",
+            "",
+        ]
+    if staged.get("diagnostic_dtb"):
+        blocks += [
+            "[Image-04]",
+            "Name = Linux diagnostics",
+            "PayloadFrom = Image-01",
+            "Type = Linux",
+            "Align = 21",
+            "DeviceTreeBlob = Image-05",
+            "",
+            "[Image-05]",
+            "Name = sheng-diagnostic-dtb",
+            "Path = %s" % staged["diagnostic_dtb"],
+            "Type = DTB",
+            # initrd_resolve protects the whole final initrd page, not only
+            # its exact bytes. A trailing DTB must start beyond that page.
+            # 64 KiB also covers unspecified/16 KiB kernel page sizes.
+            "Align = 16",
             "",
         ]
     blocks += ["[Manifest]", "Type = Manifest", ""]
@@ -152,6 +216,8 @@ def verify(packed, stock, staged, args):
         exp.append("sheng-dtb")
     if staged.get("initrd"):
         exp.append("initrd")
+    if staged.get("diagnostic_dtb"):
+        exp += ["Linux diagnostics", "sheng-diagnostic-dtb"]
     names = [e["name"] for e in m["entries"]]
     if names[:len(exp)] != exp:
         die("manifest entries %r != expected %r" % (names, exp))
@@ -180,9 +246,41 @@ def verify(packed, stock, staged, args):
     elif "HAS_DTB" in linux["flag_names"]:
         die("entry 1 unexpectedly carries a DTB")
     if staged.get("initrd"):
-        initrd_entry = m["entries"][len(exp) - 1]
+        initrd_entry = m["entries"][3]
         if initrd_entry["type_name"] != "Blob" or initrd_entry["size"] != os.path.getsize(staged["initrd"]):
             die("initrd entry mismatch")
+        page = 65536
+        start = initrd_entry["offset"]
+        if start % page:
+            die("initrd start must be aligned to the maximum supported 64 KiB page")
+        protected_end = (start + initrd_entry["size"] + page - 1) & ~(page - 1)
+        for candidate in m["entries"]:
+            if candidate is initrd_entry:
+                continue
+            if candidate["offset"] < protected_end and start < candidate["offset"] + candidate["size"]:
+                die("%s overlaps page-rounded initrd protection window" % candidate["name"])
+
+    if staged.get("diagnostic_dtb"):
+        diag_index = 4 if staged.get("initrd") else 3
+        diag = m["entries"][diag_index]
+        diag_dtb = m["entries"][diag_index + 1]
+        if diag["type_name"] != "Linux" or "EXECUTABLE" not in diag["flag_names"]:
+            die("diagnostic entry is not an executable Linux image")
+        if (diag["offset"], diag["size"]) != (linux["offset"], linux["size"]):
+            die("diagnostic entry must share the normal Linux kernel")
+        if "HAS_DTB" not in diag["flag_names"] or diag["dtb_entry"] != diag_index + 1:
+            die("diagnostic DTB reference mismatch")
+        start, size = diag_dtb["offset"], diag_dtb["size"]
+        if diag_dtb["type_name"] != "DTB" or packed[start:start + size] != read(
+                staged["diagnostic_dtb"], "diagnostic DTB"):
+            die("diagnostic DTB payload mismatch")
+        if staged.get("initrd"):
+            blob = m["entries"][3]
+            page = 65536
+            protected_start = blob["offset"] & ~(page - 1)
+            protected_end = (blob["offset"] + blob["size"] + page - 1) & ~(page - 1)
+            if start < protected_end and protected_start < start + size:
+                die("diagnostic DTB overlaps page-rounded initrd protection window")
 
     shim = m["entries"][-1]
     if shim["type_name"] != "Shim" or "EXECUTABLE" not in shim["flag_names"]:
@@ -211,6 +309,10 @@ def main():
     ap.add_argument("--no-dtb", action="store_true",
                     help="diagnostic: omit the DTB entry and pass the ABL DT through")
     ap.add_argument("--initrd", help="optional initramfs/initrd image")
+    ap.add_argument("--diagnostic", action="store_true",
+                    help="add an advanced Linux diagnostics entry (multi-user, verbose logs)")
+    ap.add_argument("--early-console", action="store_true",
+                    help="add a disabled sheng simplefb template for runtime scanout handoff")
     ap.add_argument("--runtime", required=True, help="4 MiB kShimC runtime")
     ap.add_argument("--out", required=True, help="output boot image path")
     ap.add_argument("--default", choices=("android", "linux"), default="android")
@@ -251,6 +353,10 @@ def main():
         die("--dtb and --no-dtb are mutually exclusive")
     if not args.no_dtb and not args.dtb:
         die("--dtb is required unless --no-dtb")
+    if args.diagnostic and args.no_dtb:
+        die("--diagnostic requires a DTB")
+    if args.early_console and args.no_dtb:
+        die("--early-console requires a DTB")
     if args.initrd and args.no_dtb:
         die("--initrd requires a DTB (kshim,initrd-entry lives there)")
     args.default_section = "Image-00" if args.default == "android" else "Image-01"
@@ -310,7 +416,21 @@ def main():
 
     initrd_index = 3 if initrd else None
     if dtb:
-        patch_dtb(args.dtb, staged["dtb"], args.bootargs, initrd_index)
+        patch_dtb(args.dtb, staged["dtb"], args.bootargs, initrd_index,
+                  early_console=args.early_console)
+    diagnostic_bootargs = None
+    if args.diagnostic:
+        # Replace conflicting command-line tokens instead of relying on the
+        # kernel/systemd's handling of duplicate keys. Keep normal DT unchanged.
+        drop = {"quiet", "splash", "loglevel", "systemd.unit", "systemd.log_level",
+                "systemd.show_status", "console"}
+        tokens = [t for t in args.bootargs.split() if t.split("=", 1)[0] not in drop]
+        diagnostic_bootargs = " ".join(tokens + [
+            "console=tty0", "loglevel=7", "systemd.unit=multi-user.target",
+            "systemd.log_level=debug", "systemd.show_status=yes"])
+        staged["diagnostic_dtb"] = os.path.join(work, "sheng-diagnostic.dtb")
+        patch_dtb(args.dtb, staged["diagnostic_dtb"], diagnostic_bootargs,
+                  initrd_index, diagnostic=True, early_console=args.early_console)
     config = os.path.join(work, "pack.ini")
     write_config(config, args, staged)
 
@@ -348,6 +468,8 @@ def main():
         "timeout_ms": args.timeout_ms,
         "bootargs": args.bootargs if dtb else None,
         "initrd_index": initrd_index,
+        "diagnostic_bootargs": diagnostic_bootargs,
+        "early_console": args.early_console,
         "manifest": m,
     }
     with open(args.out + ".json", "w", encoding="utf-8") as f:
