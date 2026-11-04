@@ -1,0 +1,11 @@
+{
+  "profile": "config/sheng_defconfig",
+  "source": "vendor/kshim in this checkout",
+  "built_at": "2026-11-04",
+  "mode": "manifest",
+  "bytes": 4194304,
+  "sha256": "f6bd141b9c993d769100511499b586dd39c3a9715db3a6876e5705c0ccd1302f",
+  "toolchain": "GNU AArch64 GCC 16.1.1",
+  "undefined_symbols": [],
+  "combined_kernel_display_hardware_tested": false
+}

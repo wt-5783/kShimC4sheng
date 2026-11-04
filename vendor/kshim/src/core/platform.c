@@ -730,7 +730,16 @@ static void charging_loop(void)
     }
 }
 #endif
-int kshim_platform_prepare_handoff(void)
+static int DeferredHandoff;
+
+void kshim_platform_set_deferred_handoff(int deferred)
+{
+    DeferredHandoff = deferred != 0;
+}
+
+/* Manifest callers still have DT and SDAM work after menu selection. Stop
+ * the UI now, but retain translation/cache until their final prepare_boot. */
+static int quiesce_menu(void)
 {
 #if CONFIG_KSHIM_FRAMEBUFFER && CONFIG_KSHIM_LVGL
 #if CONFIG_KSHIM_TOUCH
@@ -742,6 +751,12 @@ int kshim_platform_prepare_handoff(void)
     if (kshim_lvgl_os_prepare_shutdown()) return -2;
 #endif
 #endif
+    return 0;
+}
+
+int kshim_platform_prepare_handoff(void)
+{
+    if (quiesce_menu()) return -1;
 #if CONFIG_KSHIM_SMP
     if (SmpInitialized) {
         if (kshim_smp_prepare_handoff(KSHIM_SMP_DEFAULT_TIMEOUT_US)) return -2;
@@ -1152,7 +1167,8 @@ static int settings_payload_available(const struct menu_selection *menu, size_t 
     enum device_board board;
     if (!menu->payload_boards || i >= menu->caller_count) return 0;
     board = menu->payload_boards[i];
-    if (board != DEVICE_BOARD_TB322FC && board != DEVICE_BOARD_TB323FU) return 0;
+    if (board != DEVICE_BOARD_TB322FC && board != DEVICE_BOARD_TB323FU &&
+        board != DEVICE_BOARD_SHENG) return 0;
     return board == menu->effective;
 }
 /* Resolve one Linux system role (INTERNAL / TF / DIAGNOSTIC) to its unique
@@ -1415,7 +1431,8 @@ static int menu_fill_settings(struct menu_selection *menu)
          * keep their explicit payload semantics; UNKNOWN is never a mismatch. */
         board = menu->payload_boards ? menu->payload_boards[i] : DEVICE_BOARD_UNKNOWN;
         board_known_other =
-            (board == DEVICE_BOARD_TB322FC || board == DEVICE_BOARD_TB323FU) &&
+            (board == DEVICE_BOARD_TB322FC || board == DEVICE_BOARD_TB323FU ||
+             board == DEVICE_BOARD_SHENG) &&
             board != menu->effective;
         if (board_known_other) {
             if (menu_append(&menu->pages[page_index],
@@ -2087,7 +2104,11 @@ static int platform_select(uint64_t fdt, const char *const *names,
 #if CONFIG_KSHIM_FRAMEBUFFER && CONFIG_KSHIM_LVGL
     struct menu_page *page = &menu.pages[menu.page];
     GuiStatus = -1;
-    int status = start_menu(menu.fdt, ChargerUiRequested != 0);
+    int skip_ui = 0;
+#if defined(CONFIG_KSHIM_CHARGER_MODE) && CONFIG_KSHIM_CHARGER_MODE
+    skip_ui = ChargerUiRequested != 0;
+#endif
+    int status = start_menu(menu.fdt, skip_ui);
     if (status) GuiStatus = -3;
     else GuiStatus = -2;
 #if defined(CONFIG_KSHIM_CHARGER_MODE) && CONFIG_KSHIM_CHARGER_MODE && \
@@ -2157,14 +2178,18 @@ static int platform_select(uint64_t fdt, const char *const *names,
             kshim_lvgl_set_status(&Lvgl, KSHIM_STR_BOOTING);
             {
                 uint64_t hint_start = get_current_time();
-                while (get_current_time() - hint_start < 800U) menu_frame();
+                while (get_current_time() - hint_start < 80U) {
+                    menu_frame();
+                    (void)delay(5000);
+                }
             }
 #if CONFIG_KSHIM_DIAGNOSTIC_UI_ONLY
             int close = kshim_platform_prepare_handoff();
             ui_probe_report((void *)(uintptr_t)fdt, close, *selected);
             return close ? -2 : 0;
 #else
-            return kshim_platform_prepare_handoff() ? -2 : 0;
+            return (DeferredHandoff ? quiesce_menu() :
+                    kshim_platform_prepare_handoff()) ? -2 : 0;
 #endif
         }
     }
@@ -2175,7 +2200,7 @@ static int platform_select(uint64_t fdt, const char *const *names,
         if (close) return -2;
     }
 #else
-    if (kshim_platform_prepare_handoff()) return -2;
+    if (DeferredHandoff ? quiesce_menu() : kshim_platform_prepare_handoff()) return -2;
 #endif
 #if !CONFIG_KSHIM_DEBUG_CONSOLE
     /* Approved minimal gate: the initial GUI never started on TB322FC and the

@@ -503,7 +503,7 @@ extern void _arm64_mmu_setup(void);
 /* Last operation before leaving the runtime, after all boot diagnostics. */
 static void prepare_boot(void)
 {
-    if (kshim_platform_prepare_handoff() || kshim_console_quiesce()) {
+    if (kshim_console_quiesce() || kshim_platform_prepare_handoff()) {
         printf("Device shutdown incomplete; refusing payload handoff\n");
         for (;;) (void)delay(100000);
     }
@@ -856,6 +856,7 @@ int kshim_main(
             arm64_boot_linux(linux_base, device_tree_address, 4);
         }
 
+        kshim_platform_set_deferred_handoff(1);
         uint32_t selected_index = select_image(&view, device_tree_address, linux_base,
                                                &device_info);
         kshim_boot_metrics_record_once(KSHIM_BOOT_STAGE_HANDOFF);

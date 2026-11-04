@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 
 def main():
@@ -23,7 +24,8 @@ def main():
     for label, command in (
         ("configure", ["cmake", "-S", root, "-B", out, "-G", "Ninja",
                        "-DKSHIM_STANDALONE=OFF", "-DKSHIM_RUNTIME_SLOT_SIZE=0x400000",
-                       "-DKSHIM_UEFI_PAYLOAD=", "-DCMAKE_BUILD_TYPE=Release"]),
+                       "-DKSHIM_UEFI_PAYLOAD=", "-DCMAKE_BUILD_TYPE=Release",
+                       "-DPython3_EXECUTABLE=" + sys.executable]),
         ("build", ["cmake", "--build", out, "-j", str(args.jobs)]),
     ):
         with (out / (label + ".log")).open("w") as log:

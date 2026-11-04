@@ -148,6 +148,8 @@ static size_t expected_count(void)
 static void setup(bool serial, size_t count)
 {
     memset(&h, 0, sizeof(h));
+    KeysReady = 0;
+    kshim_platform_set_deferred_handoff(0);
 #if CONFIG_KSHIM_MENU_LANGUAGE_SWITCH
     /* The locale module keeps a session language; reset it to the configured
      * default so each case starts from a known locale. */
@@ -354,6 +356,11 @@ int kshim_mmu_add_region(uint64_t base, uint64_t size,
                          kshim_mmu_memory_type_t type, uint32_t permissions)
 { (void)base; (void)size; (void)type; (void)permissions; return 0; }
 int kshim_mmu_prepare_handoff(void) { ++h.handoff_calls; return h.handoff_result; }
+/* Menu tests do not access PMIC storage; persistence is covered separately. */
+int kshim_nv_store_settings(const void *fdt, uint8_t language, uint8_t timeout_s)
+{ (void)fdt; (void)language; (void)timeout_s; return 0; }
+int kshim_qcom_reboot_last_stage;
+int kshim_qcom_reboot_spmi_detail;
 void kshim_boot_set_args(uint64_t fdt, uint64_t a, uint64_t b, uint64_t c)
 { (void)fdt; (void)a; (void)b; (void)c; }
 void kshim_lvgl_set_scratch(void *base, size_t size) { (void)base; (void)size; }
@@ -3001,10 +3008,80 @@ static void test_settings_internal_tf_default_timeout(void)
     }
 }
 
+#ifdef KSHIM_TEST_SHENG_DIAGNOSTIC_ONLY
+static void test_sheng_diagnostic_entry(void)
+{
+    static const kshim_menu_role_t roles[] = {
+        KSHIM_MENU_ROLE_ANDROID, KSHIM_MENU_ROLE_UNKNOWN,
+        KSHIM_MENU_ROLE_DIAGNOSTIC, KSHIM_MENU_ROLE_DIAGNOSTIC };
+    struct device_info info = settings_info(DEVICE_BOARD_SHENG);
+    const enum device_board cases[][4] = {
+        { DEVICE_BOARD_UNKNOWN, DEVICE_BOARD_SHENG, DEVICE_BOARD_SHENG, DEVICE_BOARD_UNKNOWN },
+        { DEVICE_BOARD_UNKNOWN, DEVICE_BOARD_SHENG, DEVICE_BOARD_TB323FU, DEVICE_BOARD_UNKNOWN },
+        { DEVICE_BOARD_UNKNOWN, DEVICE_BOARD_SHENG, DEVICE_BOARD_UNKNOWN, DEVICE_BOARD_UNKNOWN },
+        { DEVICE_BOARD_UNKNOWN, DEVICE_BOARD_SHENG, DEVICE_BOARD_SHENG, DEVICE_BOARD_SHENG },
+    };
+    for (size_t c = 0; c < 4; ++c) {
+        size_t count = c == 3 ? 4 : 3;
+        settings_setup(0, count);
+        ui_at(5, 2, 1); /* Android, Linux, Advanced */
+        if (c == 0) {
+            ui_at(10, 0, 0); /* real diagnostic, original caller index 2 */
+        } else {
+            ui_at(10, 3, 0); /* no valid diagnostic: Back */
+            ui_at(15, 0, 0); /* Android */
+        }
+        int rc;
+        size_t selected = settings_run(roles, cases[c], &info, count, 0, 8000, 4, &rc);
+        assert(rc == 0 && selected == (c == 0 ? 2U : 0U));
+        assert(h.info_snap_count >= 2);
+        const info_snap_t *adv = &h.info_snaps[1];
+        assert(adv->count == (c == 0 ? 5U : 4U));
+        if (c == 0) settings_expect_system(adv, 0, KSHIM_MENU_ROLE_DIAGNOSTIC, 1);
+        else assert(adv->roles[0] == KSHIM_MENU_ROLE_FASTBOOT);
+        assert(h.reboot_calls == 0 && h.reset_calls == 0 && h.off_calls == 0);
+    }
+    /* Adding diagnostics must not change the ordinary Linux default mapping. */
+    settings_setup(0, 3);
+    int rc;
+    size_t selected = settings_run(roles, cases[0], &info, 3, 1, 100, 4, &rc);
+    assert(rc == 0 && selected == 1);
+}
+#endif
 #endif /* KSHIM_SETTINGS_MENU_TESTS */
+
+static void test_manifest_defers_mmu_shutdown(void)
+{
+    /* A manifest caller must be able to finish SDAM/DT work with caches on.
+     * A final MMU shutdown failure belongs to the caller, not menu selection. */
+    for (unsigned fail = 0; fail < 2; ++fail) {
+        setup(false, 2);
+        ui_at(5, 0, 0);
+        h.handoff_result = fail ? -1 : 0;
+        size_t selected = 12345;
+        kshim_platform_set_deferred_handoff(1);
+        assert(kshim_platform_select(boot_fdt(), h.names, 2, 0, 8000,
+                                     &selected) == 0);
+        assert(selected == 0 && !h.ui_alive);
+        assert(h.deinit_calls == 1 && h.handoff_calls == 0);
+        assert(kshim_platform_prepare_handoff() == (fail ? -1 : 0));
+        assert(h.handoff_calls == 1);
+        kshim_platform_set_deferred_handoff(0);
+    }
+}
 
 int main(void)
 {
+#ifdef KSHIM_TEST_SHENG_DIAGNOSTIC_ONLY
+    test_sheng_diagnostic_entry();
+    puts("PASS: sheng diagnostic selection, board/duplicate guards, ordinary Linux default");
+    return 0;
+#endif
+    test_manifest_defers_mmu_shutdown();
+#ifdef KSHIM_TEST_DEFERRED_ONLY
+    puts("PASS: manifest menu retains caches; final handoff shuts down once");
+    return 0;
+#endif
 #if CONFIG_KSHIM_MENU_LANGUAGE_SWITCH
     test_language_page_switch();
     test_language_page_navigation();

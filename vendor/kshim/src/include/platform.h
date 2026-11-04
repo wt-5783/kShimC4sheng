@@ -67,5 +67,8 @@ int kshim_platform_select_localized_settings(uint64_t fdt, const char *const *na
                                              size_t count, size_t initial,
                                              uint32_t timeout_ms,
                                              uint64_t advanced_mask, size_t *selected);
+/* Manifest mode has work after selection; retain MMU/cache until the final
+ * prepare_handoff. Standalone/API callers keep immediate cleanup by default. */
+void kshim_platform_set_deferred_handoff(int deferred);
 int kshim_platform_prepare_handoff(void);
 void kshim_platform_request_charger_ui(void);

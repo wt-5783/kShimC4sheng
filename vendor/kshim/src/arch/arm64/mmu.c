@@ -793,7 +793,16 @@ int kshim_mmu_configure_early(const kshim_mmu_early_config_t *config)
             goto failed;
         }
     }
-    /* Only the image is written through the cache by this runtime. */
+    /* Flush both private scratch and the incoming DT, which diagnostic /
+     * Android handoff code may update while early translation is enabled. */
+    if (config->fdt != NULL && fdt_check_header(config->fdt) == 0) {
+        mMmu.regions[mMmu.region_count++] = (kshim_mmu_region_t){
+            .base = (uint64_t)(uintptr_t)config->fdt,
+            .size = (uint32_t)fdt_totalsize(config->fdt),
+            .type = KSHIM_MMU_NORMAL_WB,
+            .permissions = KSHIM_MMU_READ | KSHIM_MMU_WRITE,
+        };
+    }
     mMmu.regions[mMmu.region_count++] = (kshim_mmu_region_t){
         .base = image_base,
         .size = image_span,
