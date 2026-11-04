@@ -48,6 +48,23 @@ def make_v0_boot(kernel, ramdisk=b"", page=4096):
     return out
 
 
+def make_v2_boot(kernel, dtb, ramdisk=b"", second=b"", recovery=b"", page=4096):
+    out = bytearray(make_v0_boot(kernel, ramdisk, page))
+    out += b"\0" * ((-len(out)) % page)
+    struct.pack_into("<I", out, 24, len(second))
+    out += second
+    out += b"\0" * ((-len(out)) % page)
+    struct.pack_into("<I", out, 40, 2)
+    struct.pack_into("<I", out, 1632, len(recovery))
+    struct.pack_into("<Q", out, 1636, len(out) if recovery else 0)
+    struct.pack_into("<I", out, 1644, 1660)
+    struct.pack_into("<I", out, 1648, len(dtb))
+    out += recovery
+    out += b"\0" * ((-len(out)) % page)
+    out += dtb
+    return bytes(out)
+
+
 def make_dtb(path, compatible="xiaomi,sheng", extra=""):
     dts = path + ".dts"
     with open(dts, "w") as f:

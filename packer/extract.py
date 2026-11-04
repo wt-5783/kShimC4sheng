@@ -96,6 +96,16 @@ def extract(boot_path, out_dir, prefix, stock=False):
                                   src[off:off + size])
             if src is data:
                 data = data[:off]
+        # Prefer the explicit v2 DTB, which may contain per-device BD/MAC
+        # addresses absent from the generic /boot DTB.
+        if image.get("dtb"):
+            separate = image["dtb"]
+            separate_fdt = find_fdt(separate, at_start=True)
+            if separate_fdt is None:
+                raise BootImageError("invalid separate DTB in boot image")
+            off, size = separate_fdt
+            result["dtb"] = write(os.path.join(out_dir, prefix + ".dtb"),
+                                  separate[off:off + size])
         assert_raw_arm64_image(data, "distro kernel")
         result["kernel"] = write(os.path.join(out_dir, prefix + "-Image"), data)
 

@@ -86,6 +86,21 @@ def parse(data):
             raise BootImageError("ramdisk extends past image")
         dtb_size = u32(data, 1648) if version >= 2 else 0
         dtb_addr = u64(data, 1652) if version >= 2 else 0
+        dtb_off = 0
+        if dtb_size:
+            # v2 carries a separate DTB after ramdisk, second and recovery_dtbo.
+            # It is not necessarily appended to the kernel (sheng boot_b).
+            dtb_off = align_up(kernel_off + kernel_size, page)
+            dtb_off = align_up(dtb_off + ramdisk_size, page)
+            dtb_off = align_up(dtb_off + u32(data, 24), page)
+            recovery_size = u32(data, 1632)
+            if recovery_size:
+                recovery_off = u64(data, 1636)
+                if recovery_off < dtb_off:
+                    raise BootImageError("recovery DTBO overlaps payload")
+                dtb_off = align_up(recovery_off + recovery_size, page)
+            if dtb_off + dtb_size > len(data):
+                raise BootImageError("DTB extends past image")
         info.update({
             "page_size": page,
             "header_size": header_size,
@@ -97,6 +112,8 @@ def parse(data):
             "ramdisk": bytes(data[ramdisk_off:ramdisk_off + ramdisk_size]),
             "dtb_size": dtb_size,
             "dtb_addr": dtb_addr,
+            "dtb_offset": dtb_off,
+            "dtb": bytes(data[dtb_off:dtb_off + dtb_size]),
             "os_version": u32(data, 44),
             "cmdline": _cstr(data[64:576]) + _cstr(data[608:1632]),
             "name": _cstr(data[48:64]),

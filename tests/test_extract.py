@@ -50,6 +50,36 @@ class ExtractTest(unittest.TestCase):
         self.assertEqual(open(os.path.join(out, "linux-initrd.img"), "rb").read(), ramdisk)
         self.assertEqual(info["dtb"]["size"], len(dtb_data))
 
+    def test_v2_separate_dtb_preserves_device_address(self):
+        kernel = helpers.make_image()
+        dtb = helpers.make_dtb(os.path.join(self.d, "device.dtb"), extra='''
+            bluetooth { local-bd-address = [12 34 56 78 9a bc]; };
+        ''')
+        with open(dtb, "rb") as f:
+            dtb_data = f.read()
+        for second, recovery in [(b"", b""), (b"second", b"recovery")]:
+            with self.subTest(second=bool(second), recovery=bool(recovery)):
+                boot = os.path.join(self.d, "v2.img")
+                with open(boot, "wb") as f:
+                    f.write(helpers.make_v2_boot(kernel, dtb_data, b"initrd",
+                                                 second, recovery))
+                p = self.run_extract("--boot", boot, "--out", self.d,
+                                     "--prefix", "v2")
+                self.assertEqual(p.returncode, 0, p.stderr)
+                with open(os.path.join(self.d, "v2.dtb"), "rb") as f:
+                    self.assertEqual(f.read(), dtb_data)
+
+    def test_rejects_truncated_v2_dtb(self):
+        dtb = helpers.make_dtb(os.path.join(self.d, "truncated.dtb"))
+        with open(dtb, "rb") as f:
+            image = helpers.make_v2_boot(helpers.make_image(), f.read())
+        boot = os.path.join(self.d, "truncated.img")
+        with open(boot, "wb") as f:
+            f.write(image[:-1])
+        p = self.run_extract("--boot", boot, "--out", self.d, "--prefix", "bad")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("DTB extends past image", p.stderr)
+
     def test_rejects_gzip_as_stock(self):
         boot = os.path.join(self.d, "bad.img")
         open(boot, "wb").write(helpers.make_v4_boot(helpers.gzip_bytes(helpers.make_image())))
