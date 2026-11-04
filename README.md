@@ -1,5 +1,11 @@
 # kShimC4sheng
 
+本维护分支：[wt-5783/kShimC4sheng](https://github.com/wt-5783/kShimC4sheng)，
+上游：[tc1911/kShimC4sheng](https://github.com/tc1911/kShimC4sheng)。
+2026-11-04 更新包含 Linux 载荷提取、交接性能、诊断入口及可选早期控制台修复；
+预编译 runtime 已同步。新显示交接组合已编译并通过主机验证，真机效果仍待重启确认。
+工作目录与本地产物说明见 [docs/workspace.md](docs/workspace.md)。
+
 为 **小米平板 6S Pro（sheng / SM8550）** 做一个开机菜单，替代现在
 `fastboot set_active a|b` / WoaManager 刷 boot 分区的双系统切换方式。
 
@@ -13,9 +19,9 @@
 首次启动默认 8 秒后进 Android，之后会记住上次启动的系统；音量键选择、
 电源键确认（sheng 的触屏驱动未适配，与两代 Y700 一样只用按键）。
 
-> 状态：**真机双系统已跑通（2026-10-27，sheng / A 槽，kShimC 0.0.4）**。
+> 上游历史验证：**真机双系统已跑通（2026-10-27，sheng / A 槽，kShimC 0.0.4）**。
 > Android 原厂与 Debian forky/KDE 都能从菜单正常引导。
-> 当前 `boot_a` = `out/boot_a_v003.img`，90,005,504 B，sha256
+> 当时的 `boot_a` = `out/boot_a_v003.img`，90,005,504 B，sha256
 > `e18dd5621c24a9dd3bef8eeb1e39c203c0913d29dcd11a004e39a010964e704d`。
 > `linux` 分区 128 GiB（`PARTLABEL=linux`），`userdata` 104.4 GiB。
 > 菜单 7 项、音量键/电源键，会记住上次启动的系统（PMIC SDAM）；
@@ -97,7 +103,7 @@ vendor/
   packer/          MultiBootKernelPatcher（GPL-3.0-or-later）
 windows/           Windows 一键构建（.bat + build.py）
 prebuilt/          sheng runtime 与 Windows 可执行文件
-tests/             纯 Python 回归（合成镜像，不需要设备）
+tests/             Python 回归与 C 交接回放（合成镜像，不需要设备）
 docs/              架构、设备资料、上机计划、排障、来源
 ```
 
@@ -124,11 +130,55 @@ scripts/make-boot.sh \
 - Linux：只需要 `python3` + `bash`（DTB 编辑已改为纯 Python，不再需要 `dtc`/`fdtput`）；第一次会自动用 `cmake` 编译打包器。
 - Windows：见下面的“Windows 一键构建”。
 - **不需要交叉编译器**：默认复用仓库里的 `prebuilt/sheng-runtime.bin`
-  （4 MiB，sha256 `d8e1becb…`）。只有改菜单/配置时才需要重建 runtime。
+  （4 MiB，sha256 `f6bd141b…`，详见 `prebuilt/README.md`）。只有改 runtime/配置时才需要重建。
 - `--stock-boot` 可以是整块 `boot_a` 分区 dump，也可以是裁剪过的 boot 镜像。
 - `--linux-image` 支持未压缩的 ARM64 `Image`，也支持内核构建直接产出的
   `Image.gz`（会自动解压）。
 - 输出会保留原厂 boot 头版本与分区大小，并检查不超 192 MiB。
+
+### Linux 诊断模式（高级启动）
+
+打包时给 `scripts/make-boot.sh`、`scripts/build.sh` 或
+`packer/make_boot.py` 加 `--diagnostic`，高级启动页会在 Fastboot 前增加
+**Linux 诊断模式**。当前随仓库提供的 prebuilt 已包含 sheng 诊断机型校验修复，
+可直接复用；外部旧版 runtime 可能隐藏该条目，需要更新或重建。
+
+诊断项复用普通 Linux 内核和 initrd，使用单独的 DTB，保留设备专属地址与根分区参数，
+添加 `armada,boot-stage=maintenance` 以便菜单识别。诊断启动使用
+`systemd.unit=multi-user.target`、`console=tty0`、内核详细日志和 systemd debug 日志，
+**不启动图形桌面**。可用外接键盘登录，或在发行版已启用 SSH 的前提下远程登录。
+它不是独立救援系统：rootfs 或 initrd 损坏时仍可能无法启动，不自动修复磁盘、
+不绕过登录认证。普通 Linux 的 DTB、启动参数和默认项不变。
+
+退出可执行 `systemctl reboot`，在菜单重新选择普通 Linux。
+菜单原有“记住上次启动项”也会记住诊断项；返回正常使用时应手动选择普通 Linux。
+
+### Linux 早期控制台交接（sheng，可选测试）
+
+`--early-console` 为普通 Linux 和诊断 DTB 都加入禁用的 simplefb 模板。
+菜单退出时由 runtime 填入实际扫描缓冲地址、尺寸和内存保留；打包阶段不会
+硬编码其他机型的 framebuffer 地址，也不会修改蓝牙地址或传感器配置。
+不加此选项的 DTB 行为保持不变。该选项需要支持 `dt_simplefb_apply()` 的 runtime，
+并使用启用了 `CONFIG_FB_SIMPLE` 的内核；本机当前内核满足此配置。
+
+```sh
+# 同版本内核加入 SM8550 显示时钟修复；只构建，不安装
+scripts/build-handoff-kernel.sh --source /path/to/sheng-7.2.6-source --jobs 4
+
+# 使用本机已验证的 DTB/initrd，保留普通及高级诊断入口
+scripts/make-boot.sh \
+  --stock-boot out/backup/boot_a-stock-trimmed.img \
+  --linux-image out/linux-handoff-kernel/arch/arm64/boot/Image \
+  --dtb out/fix1-payload/linux.dtb --initrd out/fix1-payload/linux-initrd.img \
+  --runtime out/runtime.bin --diagnostic --early-console \
+  --bootargs 'root=PARTLABEL=linux rw rootwait udmabuf.size_limit_mb=256 console=tty0' \
+  --out out/boot_a_arch_handoff.img
+```
+
+内核构建固定源提交及原配置，详见 `patches/kernel/README.md`。这不是完全无缝显示
+的保证：原生 DRM/面板接管仍需真机验证。请先测试，不要直接删除面板复位、缩短
+规定延时或套用其他 SoC 的显示寄存器。打包器同时将 initrd 首部按 64 KiB 对齐，
+避免与前一个 DTB/内核共享交接验证所保护的页面。
 
 ### Windows 一键构建
 
@@ -182,7 +232,7 @@ DTB + initrd，更适合用这种方式先验证菜单和 Linux 启动。
 
 没有 `aarch64-linux-gnu-gcc` 时，runtime 也可以在任意装了该交叉编译器的
 容器/发行版里构建，只要把产物放到 `out/runtime.bin`。打包阶段只需要
-`out/runtime.bin`，不需要重新编译 runtime。本次构建产物：
+`out/runtime.bin`，不需要重新编译 runtime。以下为历史参考构建产物，当前版本见 `prebuilt/README.md`：
 4,194,304 B，sha256 `a24ac1ef81c11abbaa2e640b3dc0b1f8928f508fe1dfa035d9761773ceaacbb4`。
 
 ## 迁移步骤（从现有双系统）
@@ -240,7 +290,12 @@ boot 镜像注意事项见 [`LICENSES.md`](LICENSES.md) 与
 make test
 ```
 
-测试用合成 boot 镜像覆盖：v4 stock 解析、v0 `Image.gz`+DTB 提取、manifest
-布局、DTB `bootargs`、initrd 条目、超限拒绝、gzip 内核拒绝。
+需要 Python 3、GCC、dtc/fdtget；首次构建打包器还需要 CMake 和 C++ 编译器。
+21 项测试覆盖 v4 stock 解析、v0 `Image.gz`+DTB 与 v2 独立 DTB 提取、manifest
+布局、设备属性保留、诊断入口、64 KiB initrd 保护、超限拒绝、gzip Image 自动解压，
+以及普通/诊断入口的真实 C initrd/simplefb 交接回放。
+
+另可在准备固定依赖后运行 `bash tests/test-sheng-diagnostic-menu.sh` 验证诊断菜单。
+测试只验证主机逻辑，不会刷写设备。
 
 `vendor/` 下为上游副本或按上游 revision 拉取的依赖，见各自 LICENSE。

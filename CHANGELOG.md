@@ -1,5 +1,25 @@
 # Changelog
 
+## 未发布 — 2026-11-04（wt-5783 维护分支）
+
+### Linux 载荷与交接
+- 补齐 Android boot v2 的独立 DTB 提取，避免误用缺少设备地址的 DTB。
+- 菜单返回后继续保留 MMU/cache，完成设置保存和 DT 处理后再最终关闭；补齐传入 DTB 的缓存清理。
+- 启动提示固定等待由 800ms 缩短至 80ms，启用阶段计时。
+- 增加高级 Linux 诊断入口，复用普通内核/initrd；修正 sheng 诊断机型识别。
+- initrd 首部及诊断 DTB 按 64 KiB 对齐，打包后验证页取整保护区间不与其他条目重叠。
+
+### 早期控制台（可选）
+- 增加 `--early-console`，由 runtime 将实际 scanout 填入禁用的 sheng simplefb 模板。
+- 导入 Philippe Simons 的 SM8550 MDP 时钟父时钟启用修复，并提供固定源码/配置的内核构建脚本。
+- 提供独立对照与合并镜像打包脚本；未套用其他 SoC 的寄存器或 no-init-park 修改。
+- 已完成内核编译、主机交接回放及分区读回验证；不宣称真机闪屏已根治，仍需重启测试。
+
+### 构建、验证及维护
+- 修正本机裸机 runtime 构建的 Python/SSP 适配，同步最新 4 MiB prebuilt 及准确校验和。
+- Python 回归扩展至 21 项，增加真实 initrd/simplefb C 交接、设备属性及载荷一致性检查。
+- 保留原仓库提交历史；源码推送到 `wt-5783/kShimC4sheng`，本机备份、固件、设备 DTB 和构建缓存不上传。
+
 ## 0.0.4 — 2026-10-29
 
 ### 菜单
